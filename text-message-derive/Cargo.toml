@@ -1,0 +1,16 @@
+[package]
+name = "text-message-derive"
+version = "0.1.0"
+authors = ["Aleksei Sidorov <aleksei.sidorov@xdev.re>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "1.0"
+quote = "1.0"
+darling = "0.10.2"
+watt = "0.3"
+
+# serde-json-text-codec = { path = "../codecs/serde-json" }

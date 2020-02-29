@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "text-message-derive",
+    # "codecs/serde-json",    
+    "example",
+]
+
+exclude = [
+    "codecs/serde-json",    
+]
