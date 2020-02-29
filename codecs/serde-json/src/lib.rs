@@ -13,13 +13,13 @@ impl Attrs {
             Meta::List(list) => {
                 list
             },
-            other => panic!()
+            _other => panic!()
         };
 
         let meta = list.nested.iter().next().unwrap();
         match meta {
             NestedMeta::Meta(Meta::Path(path)) => Self { pretty: path.is_ident("pretty") },
-            other => panic!(),
+            _other => panic!(),
         }
     }
 }

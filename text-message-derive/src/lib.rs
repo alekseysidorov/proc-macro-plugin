@@ -6,8 +6,8 @@ use quote::ToTokens;
 use syn::{parse_macro_input, Attribute, DeriveInput, Meta};
 use watt::WasmMacro;
 
-static MACRO: WasmMacro = WasmMacro::new(WASM);
-static WASM: &[u8] = include_bytes!("../../codecs/serde-json/target/wasm32-unknown-unknown/release/serde_json_text_codec.wasm");
+use std::{fs::File, io::Read, mem, path::Path};
+
 fn find_meta_attrs(name: &str, args: &[Attribute]) -> Option<syn::NestedMeta> {
     args.as_ref()
         .iter()
@@ -42,11 +42,19 @@ pub fn text_message(input: TokenStream) -> TokenStream {
         .map(ToTokens::into_token_stream)
         .unwrap_or_default();
 
-    match attrs.codec.as_ref() {
-        "serde_json" => {
-            // serde_json_text_codec::impl_codec(input.to_token_stream().into(), params.into()).into()
-            MACRO.proc_macro_attribute("impl_codec", input.to_token_stream().into(), params.into())
-        }
-        other => panic!("Unknown test codec: `{}`", other),
-    }
+    let codec_dir = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("codecs");
+    let plugin_name = format!("{}_text_codec.wasm", attrs.codec);
+    let codec_path = codec_dir.join(plugin_name);
+
+    let mut wasm_file = File::open(&codec_path)
+        .unwrap_or_else(|_| panic!("Unable to open text codec at path: {:?}", codec_path));
+    let mut wasm_content = Vec::new();
+    wasm_file.read_to_end(&mut wasm_content).unwrap();
+
+    let wasm = unsafe { mem::transmute(wasm_content.as_slice()) };
+    WasmMacro::new(wasm).proc_macro_attribute(
+        "impl_codec",
+        input.to_token_stream().into(),
+        params.into(),
+    )
 }
