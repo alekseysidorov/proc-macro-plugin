@@ -129,20 +129,17 @@ impl WasmMacro {
         Ok(Self { module })
     }
 
-    pub fn proc_macro_attribute(
+    pub fn proc_macro_derive(
         &self,
         fun: &str,
-        attr: TokenStream,
         item: TokenStream,
     ) -> anyhow::Result<TokenStream> {
-        // To pass token streams between environments we have to serialize them to strings.
-        let attr = attr.to_string();
+        // To pass token stream between environments we have to serialize it to strings.
         let item = item.to_string();
 
         let instance = Instance::new(&self.module, &[])?;
         // To pass a string to wasm, we have allocate memory on the wasm side and copy the
         // data into it.
-        let attr_buf = WasmBuf::from_host_buf(&instance, attr);
         let item_buf = WasmBuf::from_host_buf(&instance, item);
         // Get a pointer to the desired wasm function.
         let proc_macro_attribute_fn = instance
@@ -150,13 +147,12 @@ impl WasmMacro {
             .ok_or_else(|| anyhow!("Unable to find `{}` method in the export table", fun))?
             .func()
             .ok_or_else(|| anyhow!("export {} is not a function", fun))?
-            .get4::<i32, i32, i32, i32, i32>()?;
+            .get2::<i32, i32, i32,>()?;
 
         // Serialize `WasmBuf` into (ptr, len) format to pass data into the wasm side.
-        let (attr_ptr, attr_len) = attr_buf.raw_parts();
         let (item_ptr, item_len) = item_buf.raw_parts();
         // Invoke desired function and get pointer to the resulting data.
-        let ptr = proc_macro_attribute_fn(attr_ptr, attr_len, item_ptr, item_len).unwrap();
+        let ptr = proc_macro_attribute_fn(item_ptr, item_len).unwrap();
         // Fetch data to the host.
         let res = WasmBuf::from_raw_ptr(&instance, ptr);
         let res_str = std::str::from_utf8(res.as_ref())?;

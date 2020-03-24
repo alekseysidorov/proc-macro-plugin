@@ -40,21 +40,15 @@ pub fn text_message(input: TokenStream) -> TokenStream {
     let attrs =
         TextMessageAttrs::from_raw(&input.attrs).expect("Unable to parse text message attributes.");
 
-    let params = attrs
-        .params
-        .map(ToTokens::into_token_stream)
-        .unwrap_or_default();
-
     let codec_dir = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("codecs");
     let plugin_name = format!("{}_text_codec.wasm", attrs.codec);
     let codec_path = codec_dir.join(plugin_name);
 
     let wasm_macro = WasmMacro::from_file(codec_path).expect("Unable to load wasm module");
     wasm_macro
-        .proc_macro_attribute(
-            "impl_codec",
+        .proc_macro_derive(
+            "implement_codec",
             input.into_token_stream().into(),
-            params.into(),
         )
         .expect("Unable to apply proc_macro_attribute")
 }

@@ -1,30 +1,42 @@
 use darling::FromMeta;
 use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
-use syn::{DeriveInput, Meta};
+use syn::{Attribute, DeriveInput};
+
+fn find_meta_attrs(name: &str, args: &[Attribute]) -> Option<syn::NestedMeta> {
+    args.as_ref()
+        .iter()
+        .filter_map(|a| a.parse_meta().ok())
+        .find(|m| m.path().is_ident(name))
+        .map(syn::NestedMeta::from)
+}
 
 #[derive(Debug, Default, FromMeta)]
 struct Attrs {
     pretty: bool,
 }
 
-pub fn impl_codec(input: TokenStream, meta: TokenStream) -> TokenStream {
-    let input: DeriveInput = syn::parse2(input).unwrap();
-    let meta: Option<Meta> = if meta.is_empty() {
-        None
-    } else {
-        Some(syn::parse2(meta).unwrap())
-    };
-
-    implement_codec(input, meta).into_token_stream()
+#[derive(Debug, FromMeta)]
+struct TextMessageAttrs {
+    codec: String,
+    #[darling(default)]
+    params: Option<Attrs>,
 }
 
-fn implement_codec(input: DeriveInput, params: Option<Meta>) -> impl ToTokens {
+impl TextMessageAttrs {
+    fn from_raw(attrs: &[Attribute]) -> Result<Self, darling::Error> {
+        let meta = find_meta_attrs("text_message", attrs).unwrap();
+        Self::from_nested_meta(&meta)
+    }
+}
+
+pub fn implement_codec(input: TokenStream) ->TokenStream {
+    let input: DeriveInput = syn::parse2(input).unwrap();
     let ident = &input.ident;
 
-    let attrs = params
-        .as_ref()
-        .map(|meta| Attrs::from_meta(meta).unwrap())
+    let attrs = TextMessageAttrs::from_raw(&input.attrs)
+        .expect("Unable to parse text message attributes.")
+        .params
         .unwrap_or_default();
 
     let to_string_method = if attrs.pretty {
@@ -33,7 +45,7 @@ fn implement_codec(input: DeriveInput, params: Option<Meta>) -> impl ToTokens {
         quote! { to_string }
     };
 
-    quote! {
+    let out = quote! {
         impl std::fmt::Display for #ident {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let out = serde_json::#to_string_method(self).map_err(|_| std::fmt::Error)?;
@@ -48,5 +60,6 @@ fn implement_codec(input: DeriveInput, params: Option<Meta>) -> impl ToTokens {
                 serde_json::from_str(s)
             }
         }
-    }
+    };
+    out.into_token_stream()
 }
