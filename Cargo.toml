@@ -1,7 +1,8 @@
 [workspace]
 members = [
+    "wasmtime-glue",
     "text-message-derive",
-    # "codecs/serde-json",    
+    "codecs/serde-json",    
     "example",
 ]
 

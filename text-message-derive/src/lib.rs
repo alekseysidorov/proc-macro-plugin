@@ -4,9 +4,12 @@ use darling::FromMeta;
 use proc_macro::TokenStream;
 use quote::ToTokens;
 use syn::{parse_macro_input, Attribute, DeriveInput, Meta};
-use watt::WasmMacro;
 
-use std::{fs::File, io::Read, mem, path::Path};
+use std::path::Path;
+
+use crate::wasm::WasmMacro;
+
+mod wasm;
 
 fn find_meta_attrs(name: &str, args: &[Attribute]) -> Option<syn::NestedMeta> {
     args.as_ref()
@@ -46,15 +49,12 @@ pub fn text_message(input: TokenStream) -> TokenStream {
     let plugin_name = format!("{}_text_codec.wasm", attrs.codec);
     let codec_path = codec_dir.join(plugin_name);
 
-    let mut wasm_file = File::open(&codec_path)
-        .unwrap_or_else(|_| panic!("Unable to open text codec at path: {:?}", codec_path));
-    let mut wasm_content = Vec::new();
-    wasm_file.read_to_end(&mut wasm_content).unwrap();
-
-    let wasm = unsafe { mem::transmute(wasm_content.as_slice()) };
-    WasmMacro::new(wasm).proc_macro_attribute(
-        "impl_codec",
-        input.to_token_stream().into(),
-        params.into(),
-    )
+    let wasm_macro = WasmMacro::from_file(codec_path).expect("Unable to load wasm module");
+    wasm_macro
+        .proc_macro_attribute(
+            "impl_codec",
+            input.into_token_stream().into(),
+            params.into(),
+        )
+        .expect("Unable to apply proc_macro_attribute")
 }
