@@ -30,7 +30,7 @@ impl TextMessageAttrs {
     }
 }
 
-pub fn implement_codec(input: TokenStream) ->TokenStream {
+pub fn implement_codec(input: TokenStream) -> TokenStream {
     let input: DeriveInput = syn::parse2(input).unwrap();
     let ident = &input.ident;
 
