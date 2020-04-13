@@ -13,7 +13,7 @@
 - Так как макросы самодостаточные и ничего не знают друг о друге, то нет никакой возможности делать
   композицию макросов, что иногда могло быть полезным.
 
-## Обзор того, что мы хотим получить
+## Хабракат
 
 По поводу решения первой проблемы сейчас ведутся [эксперименты][watt] с компиляцией всех
 процедурных макросов в WASM модули, что позволит в будущем вообще отказаться от их компиляции
@@ -48,7 +48,7 @@ struct FooMessage {
 Наиболее же простым и удобным видится вариант скомпилировать кодек в WASM модуль, объединив плюсы
 обоих подходов. Именно таким путем я предлагаю и пойти.
 
-## Выбор подхода и сравнение с watt
+## Выбираем подход к реализации
 
 На первый взгляд кажется, что проблема уже решена в рамках [watt] и можно просто использовать его
 для загрузки и выполнения WASM модулей, но с этим подходом есть один весьма неприятный недостаток.
@@ -63,7 +63,7 @@ struct FooMessage {
 в нем не хватает документации, хороших примеров, но развивается он очень быстро и улучшается прямо
 на глазах
 
-## Рассказ про FFI между хостом и таргетом
+## Взаимодействие хостом и таргетом
 
 **Disclaimer**: этот раздел писался еще до того, появилась возможность генерировать
 [интерфейс модуля] при помощи макросов. С другой стороны, в нем рассматривается самая
@@ -132,11 +132,262 @@ pub unsafe extern "C" fn toy_free(ptr: i32) {
 }
 ```
 
-В принципе, ничего хитрого на самом деле в этом нет, примерно этим же занимается [`wasm_bindgen`]
+В принципе, ничего хитрого на самом деле в этом нет, примерно этим же занимается [`wasm_bindgen`].
 
-## Демонстрация результата
+Теперь попробуем создать свой первый WASM модуль для нашего процедурного макроса.
+Для этого создадим крейт с единственной публичной функцией, она будет принимать указатель на начало строчки и длину строчки в байтах.
+
+```rust
+#[no_mangle]
+pub unsafe extern "C" fn implement_codec(
+    item_ptr: i32,
+    item_len: i32,
+) -> i32 {
+    let item = str_from_raw_parts(item_ptr, item_len);
+    let item = TokenStream::from_str(&item).expect("Unable to parse item");
+
+    // Здесь уже вызывается типичная функция, реализующая процедурный макрос.
+    // `fn(item: TokenStream) -> TokenStream`
+    let tokens = codec::implement_codec(item);
+    let out = tokens.to_string();
+    
+    to_host_buf(out)
+}
+
+pub unsafe fn str_from_raw_parts<'a>(ptr: i32, len: i32) -> &'a str {
+    let slice = std::slice::from_raw_parts(ptr as *const u8, len as usize);
+    std::str::from_utf8(slice).unwrap()
+}
+```
+
+Код хостовой части состоит из двух основных компонент, первым из которых является 
+загрузчик WASM модуля.
+
+```rust
+
+pub struct WasmMacro {
+    module: Module,
+}
+
+impl WasmMacro {
+    // Конструктор нашего макроса расширения.
+    pub fn from_file(file: impl AsRef<Path>) -> anyhow::Result<Self> {
+        // Загружаем и компилируем WASM модуль, находящийся по заданному пути.
+        let store = Store::default();
+        let module = Module::from_file(&store, file)?;
+        Ok(Self { module })
+    }
+
+    // Вызываем метод с именем `fun` внутри нашего модуля, в котором содержится основная логика
+    // преобразования входного TokenStream в выходной.
+    pub fn proc_macro_derive(
+        &self,
+        fun: &str,
+        item: TokenStream,
+    ) -> anyhow::Result<TokenStream> {
+        // Как уже описывалось ранее, чтобы передавать TokenStream между средами, нам необходимо
+        // преобразовать его в строку.
+        let item = item.to_string();
+
+        // Создаем конкретный экземпляр модуля, с которым и будем работать.
+        let instance = Instance::new(&self.module, &[])?;
+        // Получаем указатель на нужную нам функцию, в данном случае это описаная выше
+        // `implement_codec`.
+        let proc_macro_attribute_fn = instance
+            .get_export(fun)
+            .ok_or_else(|| anyhow!("Unable to find `{}` method in the export table", fun))?
+            .func()
+            .ok_or_else(|| anyhow!("export {} is not a function", fun))?
+            .get2::<i32, i32, i32,>()?;
+
+        // Для передачи данных строки внутрь WASM модуля используем специальную обертку,
+        // о которой я подробнее расскажу ниже.
+        let item_buf = WasmBuf::from_host_buf(&instance, item);
+        // Получим из обертки указатель на начало строки и ее длину в байтах
+        let (item_ptr, item_len) = item_buf.raw_parts();
+        // А теперь вызываем искомый метод и в результате получаем указатель
+        // на начало строки с выходным TokenStream. 
+        let ptr = proc_macro_attribute_fn(item_ptr, item_len).unwrap();
+        // Оборачиваем сырой указатель и читаем получившуюся строку.
+        let res = WasmBuf::from_raw_ptr(&instance, ptr);
+        let res_str = std::str::from_utf8(res.as_ref())?;
+        // В заключительном этапе парсим строку в TokenStream и возращаем выше.
+        TokenStream::from_str(&res_str).map_err(|_| anyhow!("Unable to parse token stream"))
+    }
+}
+```
+
+Теперь давайте чуть подробнее рассмотрим WasmBuf модуль: по сути дела это умный указатель,
+который владеет некоторой частью памяти, выделенной при помощи `toy_alloc`. Рассмотрим
+самые интересные его части, а остальной код можно посмотреть в репозитории.
+
+```rust
+struct WasmBuf<'a> {
+    // Индекс начала выделенного буфера, проще говоря, указатель на его начало.
+    offset: usize,
+    // Длина буфера в байтах.
+    len: usize,
+    // Ссылка на инстанс модуля, в котором выделялась память
+    instance: &'a Instance,
+    // Ссылка на всю память, связанную с этим инстансом.
+    memory: &'a Memory,
+}
+
+const WASM_PTR_LEN: usize = 4;
+
+impl<'a> WasmBuf<'a> {
+    // Самый простой конструктор буфера: мы просто при помощи `toy_alloc`
+    // запрашиваем искомое число байт.
+    pub fn new(instance: &'a Instance, len: usize) -> Self {
+        let memory = Self::get_memory(instance);
+        // Выделяем память и получаем на нее указатель.
+        let offset = Self::toy_alloc(instance, len);
+
+        Self {
+            offset: offset as usize,
+            len,
+            instance,
+            memory,
+        }
+    }
+
+    // Намного удобнее не просто запрашивать буфер, а потом руками заполнять его, а сразу
+    // передать ссылку на байты, которые мы хотим в него записать.
+    pub fn from_host_buf(instance: &'a Instance, bytes: impl AsRef<[u8]>) -> Self {
+        let bytes = bytes.as_ref();
+        let len = bytes.len();
+
+        let mut wasm_buf = Self::new(instance, len);
+        // Копируем байты с хостового буфера в буфер таргета.
+        wasm_buf.as_mut().copy_from_slice(bytes);
+        wasm_buf
+    }
+
+    // Если же буфер был выделен внутри таргета, то все становится несколько сложнее.
+    // Так как получить мы можем лишь указатель на начало буфера и непонятно каким же
+    // образом мы получим размер выделеной памяти.
+    // Но мы не зря написали `toy_alloc` таким образом, чтобы первые его 4 байта содержали
+    // размер выделенного буфера.
+    pub fn from_raw_ptr(instance: &'a Instance, offset: i32) -> Self {
+        let offset = offset as usize;
+        let memory = Self::get_memory(instance);
+
+        let len = unsafe {
+            // Получаем сырой указатель на память инстанса.
+            let buf = memory.data_unchecked();
+
+            let mut len_bytes = [0; WASM_PTR_LEN];
+            // Читаем байты с размером выделенного буфера.
+            len_bytes.copy_from_slice(&buf[offset..offset + WASM_PTR_LEN]);
+            u32::from_le_bytes(len_bytes)
+        };
+
+        Self {
+            offset,
+            len: len as usize,
+            memory,
+            instance,
+        }
+    }
+
+    // Методы для чтения и записи данных являются весьма тривиальными.
+    // Важно лишь помнить про то, что нужно читать со смещением в 4 байта.
+
+    pub fn as_ref(&self) -> &[u8] {
+        unsafe {
+            let begin = self.offset + WASM_PTR_LEN;
+            let end = begin + self.len;
+
+            &self.memory.data_unchecked()[begin..end]
+        }
+    }
+
+    pub fn as_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            let begin = self.offset + WASM_PTR_LEN;
+            let end = begin + self.len;
+
+            &mut self.memory.data_unchecked_mut()[begin..end]
+        }
+    }    
+}
+```
+
+Важно не забывать вызывать деструктор, который будет очищать выделенную память.
+
+```rust
+impl Drop for WasmBuf<'_> {
+    fn drop(&mut self) {
+        Self::toy_free(self.instance, self.len);
+    }
+}
+```
+
+## Собираем все вместе
+
+И вот теперь мы можем спокойно написать наш искомый процедурный макрос, который будет 
+использовать WASM модули для расширения функциональности, без необходимости перекомпиляции.
+
+```rust
+#[proc_macro_derive(TextMessage, attributes(text_message))]
+pub fn text_message(input: TokenStream) -> TokenStream {
+    let input: DeriveInput = parse_macro_input!(input);
+
+    let attrs =
+        TextMessageAttrs::from_raw(&input.attrs).expect("Unable to parse text message attributes.");
+
+    // Для простоты будем грузить модули из директории codecs, которые имеют особым образом
+    // сформированное имя. 
+    let codec_dir = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("codecs");
+    let plugin_name = format!("{}_text_codec.wasm", attrs.codec);
+    let codec_path = codec_dir.join(plugin_name);
+
+    let wasm_macro = WasmMacro::from_file(codec_path).expect("Unable to load wasm module");
+    wasm_macro
+        .proc_macro_derive(
+            "implement_codec",
+            input.into_token_stream().into(),
+        )
+        .expect("Unable to apply proc_macro_attribute")
+}
+```
+
+В [репозитории] есть готовый пример с демонстрацией работы. Вы можете убедиться, что кодек
+действительно загружается из WASM модуля, а не компилируется вместе с макросом.
+
+```rust
+#[derive(Debug, Serialize, Deserialize, PartialEq, TextMessage)]
+// Что особенно хорошо, каждый WASM плагин может иметь свои произвольные атрибуты.
+#[text_message(codec = "serde_json", params(pretty))]
+struct FooMessage {
+    name: String,
+    description: String,
+    value: u64,
+}
+
+fn main() {
+    let msg = FooMessage {
+        name: "Linus Torvalds".to_owned(),
+        description: "The Linux founder.".to_owned(),
+        value: 1,
+    };
+
+    let text = msg.to_string();
+    println!("{}", text);
+    let msg2 = text.parse().unwrap();
+
+    assert_eq!(msg, msg2);
+}
+```
 
 ## Выводы
+
+Пока это больше похоже на троллейбус из буханки хлеба, но с другой стороны это небольшая, но
+прекрасная демонстрация самого принципа. Такие макросы становятся открытыми для расширения. 
+У нас больше нет необходимости в переписывании исходного процедурного макроса, чтобы изменить или
+расширить его поведение.
+А если же воспользоваться [реестром модулей] для WASM, то можно будет распространять подобные
+модули подобно крейтам cargo.
 
 [watt]: https://github.com/dtolnay/watt
 [libloading]: https://crates.io/crates/libloading
@@ -146,3 +397,5 @@ pub unsafe extern "C" fn toy_free(ptr: i32) {
 [bytecodealliance]: https://bytecodealliance.org/
 [интерфейс модуля]: https://github.com/bytecodealliance/wasmtime/tree/master/crates/misc/rust
 [`wasm_bindgen`]: https://habr.com/en/post/353230/
+[репозитории]: https://github.com/alekseysidorov/proc-macro-plugin/tree/master
+[реестром модулей]: https://wapm.io/

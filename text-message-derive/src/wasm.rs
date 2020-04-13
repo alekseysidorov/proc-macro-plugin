@@ -138,9 +138,6 @@ impl WasmMacro {
         let item = item.to_string();
 
         let instance = Instance::new(&self.module, &[])?;
-        // To pass a string to wasm, we have allocate memory on the wasm side and copy the
-        // data into it.
-        let item_buf = WasmBuf::from_host_buf(&instance, item);
         // Get a pointer to the desired wasm function.
         let proc_macro_attribute_fn = instance
             .get_export(fun)
@@ -149,6 +146,9 @@ impl WasmMacro {
             .ok_or_else(|| anyhow!("export {} is not a function", fun))?
             .get2::<i32, i32, i32,>()?;
 
+        // To pass a string to wasm, we have allocate memory on the wasm side and copy the
+        // data into it.
+        let item_buf = WasmBuf::from_host_buf(&instance, item);
         // Serialize `WasmBuf` into (ptr, len) format to pass data into the wasm side.
         let (item_ptr, item_len) = item_buf.raw_parts();
         // Invoke desired function and get pointer to the resulting data.
